@@ -39,6 +39,8 @@ const QRLocationScanner = () => {
     employeeId: "",
   });
 
+  const isAppleDevice = () => /Mac|iPhone|iPad|iPod/.test(navigator.userAgent);
+
   const areLocationsMatching = (userLoc, targetLoc) => {
     if (!userLoc || !targetLoc) return false;
 
@@ -73,7 +75,9 @@ const QRLocationScanner = () => {
     const distanceInKm = earthRadius * c;
     const distanceInMeters = distanceInKm * 1000;
 
-    return distanceInMeters <= 500; // threshold is 50 meters
+    const maxAllowedDistance = isAppleDevice() ? 800 : 500; // Increase tolerance on Apple devices
+
+    return distanceInMeters <= maxAllowedDistance;
   };
 
   useEffect(() => {
