@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Html5QrcodeScanner } from "html5-qrcode";
+import { Html5QrcodeScanner, Html5QrcodeScanType } from "html5-qrcode";
 import {
   UserCircle,
   LogIn,
@@ -20,6 +20,8 @@ const QRLocationScanner = () => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [apiResponse, setApiResponse] = useState(null);
+  const [cameraFacing, setCameraFacing] = useState("environment");
+
   const scannerRef = useRef(null);
 
   // Authentication states
@@ -40,22 +42,44 @@ const QRLocationScanner = () => {
   const areLocationsMatching = (userLoc, targetLoc) => {
     if (!userLoc || !targetLoc) return false;
 
+    const userLat = parseFloat(userLoc.lat);
+    const userLon = parseFloat(userLoc.lon);
     const targetLat = parseFloat(targetLoc.lat || targetLoc.Lat);
     const targetLon = parseFloat(targetLoc.lon || targetLoc.Lon);
 
-    if (isNaN(targetLat) || isNaN(targetLon)) return false;
+    if (
+      isNaN(userLat) ||
+      isNaN(userLon) ||
+      isNaN(targetLat) ||
+      isNaN(targetLon)
+    )
+      return false;
 
-    const threshold = 0.00009;
-    return (
-      Math.abs(userLoc.lat - targetLat) < threshold &&
-      Math.abs(userLoc.lon - targetLon) < threshold
-    );
+    const toRadians = (degree) => (degree * Math.PI) / 180;
+
+    const earthRadius = 6371;
+    const dLat = toRadians(targetLat - userLat);
+    const dLon = toRadians(targetLon - userLon);
+
+    const a =
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(toRadians(userLat)) *
+        Math.cos(toRadians(targetLat)) *
+        Math.sin(dLon / 2) *
+        Math.sin(dLon / 2);
+
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+    const distanceInKm = earthRadius * c;
+    const distanceInMeters = distanceInKm * 1000;
+
+    return distanceInMeters <= 10; // threshold is 50 meters
   };
 
   useEffect(() => {
     if (isAuthenticated) {
       navigator.mediaDevices
-        .getUserMedia({ video: true })
+        .getUserMedia({ video: { facingMode: { exact: "environment" } } })
         .then((stream) => {
           stream.getTracks().forEach((track) => track.stop());
           console.log("Camera permission granted");
@@ -79,7 +103,8 @@ const QRLocationScanner = () => {
             alert(
               "Location permission is required to verify your punch-in location."
             );
-          }
+          },
+          { enableHighAccuracy: true }
         );
       } else {
         alert("Geolocation is not supported by this browser.");
@@ -89,7 +114,24 @@ const QRLocationScanner = () => {
 
   useEffect(() => {
     if (openScanner && !scannedResult && location.lat && location.lon) {
-      const config = { fps: 10, qrbox: { width: 250, height: 250 } };
+      const config = {
+        fps: 10,
+        qrbox: { width: 250, height: 250 },
+        rememberLastUsedCamera: true,
+        supportedScanTypes: [Html5QrcodeScanType.SCAN_TYPE_CAMERA],
+        // Add the facingMode here via constraints for the camera
+        videoConstraints: {
+          facingMode: cameraFacing,
+        },
+      };
+
+      if (scannerRef.current) {
+        scannerRef.current.clear().catch((error) => {
+          console.error("Error clearing previous scanner:", error);
+        });
+        scannerRef.current = null;
+      }
+
       const scanner = new Html5QrcodeScanner("qr-reader", config, false);
 
       scanner.render(
@@ -173,30 +215,40 @@ const QRLocationScanner = () => {
         } catch (error) {
           console.error("Error clearing scanner:", error);
         }
+        scannerRef.current = null;
       }
     };
-  }, [openScanner, scannedResult, location, isAuthenticated]);
+  }, [openScanner, scannedResult, location, isAuthenticated, cameraFacing]);
 
   // Function to send punch-in data to backend API
+
   const sendPunchInData = async (qrData) => {
     if (!isAuthenticated) {
       alert("Please log in to record your attendance");
       return;
     }
 
-    const token = localStorage.getItem("token"); // Retrieve token from localStorage
+    const token = localStorage.getItem("token");
     if (!token) {
       alert("Token not found. Please log in again.");
       return;
     }
 
-    setIsSubmitting(true);
-    try {
-      // Parse latitude and longitude from qrData
-      const qrLat = parseFloat(qrData.lat || qrData.Lat);
-      const qrLon = parseFloat(qrData.lon || qrData.Lon);
+    if (!location || !location.lat || !location.lon) {
+      alert("Your location could not be determined. Please enable GPS.");
+      return;
+    }
 
-      // Prepare payload for the API
+    const qrLat = parseFloat(qrData.lat || qrData.Lat);
+    const qrLon = parseFloat(qrData.lon || qrData.Lon);
+    if (isNaN(qrLat) || isNaN(qrLon)) {
+      alert("Invalid QR location data. Please scan a valid QR code.");
+      return;
+    }
+
+    setIsSubmitting(true);
+
+    try {
       const payload = {
         userID: userProfile.employeeId,
         userName: userProfile.name,
@@ -213,26 +265,50 @@ const QRLocationScanner = () => {
         locationName: qrData.locationName || "Unknown Location",
       };
 
-      // Make POST request to record punch-in data
       const response = await axios.post(
         "https://gpsbackend-5mu0.onrender.com/data",
         payload,
         {
           headers: {
             "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`, // CForrect token in header
+            Authorization: `Bearer ${token}`,
           },
         }
       );
 
-      setApiResponse(response.data); // Set API response state
-      console.log("Attendance recorded:", response.data);
+      // Assuming response.data has a 'success' boolean and 'message' string
+      if (response.status === 200 && response.data.success) {
+        setApiResponse({
+          success: true,
+          message: response.data.message || "✅ PUNCHED IN SUCCESSFULLY",
+        });
+        console.log("Attendance recorded:", response.data);
+      } else {
+        setApiResponse({
+          success: false,
+          message:
+            response.data.message || "Failed to punch in. Please try again.",
+        });
+      }
     } catch (error) {
       console.error("Error recording attendance:", error);
-      setApiResponse({
-        success: false,
-        message: "Failed to record attendance. Please try again.",
-      });
+
+      if (error.response && error.response.status === 401) {
+        setApiResponse({
+          success: false,
+          message: "Unauthorized: Invalid token. Please log in again.",
+        });
+        // Optionally force logout here if you have a logout function
+        // logoutUser();
+      } else {
+        setApiResponse({
+          success: false,
+          message:
+            error?.response?.data?.message ||
+            error?.message ||
+            "Failed to record attendance. Please try again.",
+        });
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -253,43 +329,47 @@ const QRLocationScanner = () => {
     e.preventDefault();
     setIsSubmitting(true);
 
+    const endpoint =
+      authMode === "login"
+        ? "https://gpsbackend-5mu0.onrender.com/user/login"
+        : "https://gpsbackend-5mu0.onrender.com/user/signup";
+
     try {
-      const endpoint =
-        authMode === "login"
-          ? "https://gpsbackend-5mu0.onrender.com/user/login"
-          : "https://gpsbackend-5mu0.onrender.com/user/signup";
-
-      // const payload = {
-      //   ...userData,
-      //   username: userData.userName || userData.username,
-      // };
-
       const response = await axios.post(endpoint, userData, {
         headers: {
           "Content-Type": "application/json",
         },
       });
 
-      // Save token to localStorage
-      localStorage.setItem("token", response.data.token);
-      console.log("Auth Success:", response.data);
+      if (authMode === "signup") {
+        // ✅ Signup success — don't store token yet, ask user to log in
+        alert("Account created successfully! Please log in.");
+        setAuthMode("login");
+      } else {
+        // ✅ Login success — store token and auth state
+        localStorage.setItem("token", response.data.token);
 
-      // Prepare and store auth state
-      const authState = {
-        isAuthenticated: true,
-        userProfile: {
-          name: response.data.user.userName || "John Doe",
-          email: response.data.user.email,
-          employeeId: "EMP" + Math.floor(10000 + Math.random() * 90000),
-        },
-      };
-      localStorage.setItem("authState", JSON.stringify(authState));
-      console.log(userProfile.name);
+        const authState = {
+          isAuthenticated: true,
+          userProfile: {
+            name: response.data.user.userName || "John Doe",
+            email: response.data.user.email,
+            employeeId:
+              response.data.user.employeeId ||
+              "EMP" + Math.floor(10000 + Math.random() * 90000),
+          },
+        };
 
-      // Update UI state
-      setIsAuthenticated(true);
-      setShowAuthModal(false);
-      setUserProfile(authState.userProfile);
+        localStorage.setItem("authState", JSON.stringify(authState));
+
+        setScannedResult(null);
+        setIsPunchedIn(false);
+        setApiResponse(null);
+
+        setIsAuthenticated(true);
+        setShowAuthModal(false);
+        setUserProfile(authState.userProfile);
+      }
     } catch (error) {
       console.error("Authentication error:", error);
 
@@ -475,8 +555,9 @@ const QRLocationScanner = () => {
                 <>
                   <div
                     id="qr-reader"
-                    className="w-full max-h-64 border rounded-md overflow-hidden"
+                    className="w-full h-[350px] sm:h-[400px] border rounded-md overflow-hidden"
                   />
+
                   {location.lat && location.lon && (
                     <div className="text-sm mt-4 text-gray-600 w-full text-center">
                       <p className="font-medium">Current Location:</p>
@@ -486,6 +567,29 @@ const QRLocationScanner = () => {
                   )}
                 </>
               )}
+
+              <div className="mb-4 flex justify-center gap-4">
+                <button
+                  onClick={() => setCameraFacing("user")}
+                  className={`px-4 py-2 rounded-md border ${
+                    cameraFacing === "user"
+                      ? "bg-blue-600 text-white"
+                      : "bg-white"
+                  }`}
+                >
+                  Front Camera
+                </button>
+                <button
+                  onClick={() => setCameraFacing("environment")}
+                  className={`px-4 py-2 rounded-md border ${
+                    cameraFacing === "environment"
+                      ? "bg-blue-600 text-white"
+                      : "bg-white"
+                  }`}
+                >
+                  Back Camera
+                </button>
+              </div>
 
               {scannedResult && (
                 <div className="mt-4 p-4 bg-green-50 border border-green-200 rounded-md w-full">
