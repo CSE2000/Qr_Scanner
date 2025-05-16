@@ -73,7 +73,7 @@ const QRLocationScanner = () => {
     const distanceInKm = earthRadius * c;
     const distanceInMeters = distanceInKm * 1000;
 
-    return distanceInMeters <= 10; // threshold is 50 meters
+    return distanceInMeters <= 500; // threshold is 50 meters
   };
 
   useEffect(() => {
